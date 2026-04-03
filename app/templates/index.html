@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PDF to LaTeX Platform</title>
+  <style>
+    :root {
+      --bg: #f4f3ef;
+      --surface: #ffffff;
+      --text: #1f2430;
+      --muted: #5d6778;
+      --primary: #005f73;
+      --accent: #ee9b00;
+      --danger: #b42318;
+      --ok: #2f9e44;
+      --radius: 16px;
+      --shadow: 0 10px 35px rgba(5, 19, 31, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 20% 20%, #fdf0d5 0%, transparent 30%),
+        radial-gradient(circle at 85% 80%, #cae9ff 0%, transparent 25%),
+        var(--bg);
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .card {
+      width: min(1060px, 100%);
+      background: var(--surface);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 30px;
+      animation: rise 500ms ease;
+    }
+
+    @keyframes rise {
+      from { transform: translateY(14px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: clamp(1.6rem, 2.8vw, 2.2rem);
+      letter-spacing: 0.02em;
+    }
+
+    p {
+      margin: 0 0 24px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .input-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .option-row {
+      margin: 4px 0 14px;
+      color: var(--muted);
+      font-size: 0.93rem;
+      display: grid;
+      gap: 10px;
+    }
+
+    .mode-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: center;
+    }
+
+    .mode-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 0.94rem;
+    }
+
+    .mode-item input {
+      width: 16px;
+      height: 16px;
+    }
+
+    input[type="file"] {
+      flex: 1;
+      min-width: 220px;
+      border: 2px dashed #bfd5e0;
+      border-radius: 10px;
+      padding: 12px;
+      background: #f8fbfd;
+    }
+
+    button {
+      border: none;
+      border-radius: 10px;
+      padding: 12px 18px;
+      color: white;
+      background: linear-gradient(135deg, var(--primary), #0a9396);
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.18s ease, opacity 0.18s ease;
+    }
+
+    button:hover { transform: translateY(-1px); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+
+    .status {
+      margin-top: 8px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: #f7f8fa;
+      border-left: 5px solid var(--primary);
+      font-size: 0.95rem;
+    }
+
+    .status.ok { border-left-color: var(--ok); }
+    .status.fail { border-left-color: var(--danger); }
+
+    .progress-wrap {
+      margin-top: 10px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .progress-head {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .progress-track {
+      width: 100%;
+      height: 10px;
+      background: #e6eaee;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #0a9396, #94d2bd);
+      transition: width 280ms ease;
+    }
+
+    .job-meta {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 0.92rem;
+      display: grid;
+      gap: 3px;
+    }
+
+    .work-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.65fr) minmax(280px, 1fr);
+      gap: 16px;
+      align-items: start;
+    }
+
+    .live-panel {
+      border: 1px solid #d4dde5;
+      border-radius: 12px;
+      background: #f8fbfd;
+      padding: 12px;
+      min-height: 320px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 8px;
+    }
+
+    .live-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+
+    .live-content {
+      margin: 0;
+      padding: 10px;
+      border-radius: 10px;
+      border: 1px solid #e0e7ed;
+      background: #ffffff;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.82rem;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow: auto;
+      max-height: 430px;
+      color: #243447;
+    }
+
+    a.download {
+      display: inline-block;
+      margin-top: 14px;
+      text-decoration: none;
+      font-weight: 600;
+      color: white;
+      background: linear-gradient(135deg, var(--accent), #ca6702);
+      border-radius: 10px;
+      padding: 11px 15px;
+    }
+
+    @media (max-width: 940px) {
+      .work-grid {
+        grid-template-columns: 1fr;
+      }
+      .live-panel {
+        min-height: 210px;
+      }
+      .live-content {
+        max-height: 250px;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .card { padding: 20px; }
+      .input-group { flex-direction: column; }
+      button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>PDF to LaTeX Platform</h1>
+    <p>Upload a PDF and get a ZIP package with main.tex and a figures folder.</p>
+
+    <div class="input-group">
+      <input id="pdfFile" type="file" accept="application/pdf,.pdf">
+      <button id="convertBtn" type="button">Convert</button>
+    </div>
+
+    <div class="option-row">
+      <div>Recognition mode:</div>
+      <div class="mode-group">
+        <label class="mode-item" for="modeLocal">
+          <input id="modeLocal" name="recognitionMode" type="radio" value="local" checked>
+          <span>Local recognition</span>
+        </label>
+        <label class="mode-item" for="modeDeepSeek">
+          <input id="modeDeepSeek" name="recognitionMode" type="radio" value="deepseek">
+          <span>DeepSeek recognition</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="work-grid">
+      <section>
+        <div id="status" class="status">Waiting for a PDF upload.</div>
+        <div class="progress-wrap" id="progressWrap" hidden>
+          <div class="progress-head">
+            <span id="progressStep">Waiting to start</span>
+            <span id="progressValue">0%</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+        </div>
+        <div id="meta" class="job-meta"></div>
+        <div id="download"></div>
+      </section>
+
+      <aside id="deepseekPanel" class="live-panel" hidden>
+        <div class="live-head">
+          <strong>DeepSeek live output</strong>
+          <span id="deepseekLiveStats">0 chars</span>
+        </div>
+        <pre id="deepseekLiveText" class="live-content">Waiting for DeepSeek output...</pre>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    const fileInput = document.getElementById("pdfFile");
+    const convertBtn = document.getElementById("convertBtn");
+    const modeLocalEl = document.getElementById("modeLocal");
+    const modeDeepSeekEl = document.getElementById("modeDeepSeek");
+    const statusEl = document.getElementById("status");
+    const progressWrapEl = document.getElementById("progressWrap");
+    const progressStepEl = document.getElementById("progressStep");
+    const progressValueEl = document.getElementById("progressValue");
+    const progressFillEl = document.getElementById("progressFill");
+    const metaEl = document.getElementById("meta");
+    const downloadEl = document.getElementById("download");
+    const deepseekPanelEl = document.getElementById("deepseekPanel");
+    const deepseekLiveTextEl = document.getElementById("deepseekLiveText");
+    const deepseekLiveStatsEl = document.getElementById("deepseekLiveStats");
+
+    let pollTimer = null;
+    let deepseekApiKey = "";
+    let lastLiveText = "";
+
+    function setStatus(message, mode = "") {
+      statusEl.textContent = message;
+      statusEl.className = `status ${mode}`.trim();
+    }
+
+    function stopPolling() {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }
+
+    function updateProgressUI(percent, step) {
+      const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
+      progressWrapEl.hidden = false;
+      progressFillEl.style.width = `${safePercent}%`;
+      progressValueEl.textContent = `${safePercent}%`;
+      progressStepEl.textContent = step || "Processing...";
+    }
+
+    function resetProgressUI() {
+      progressWrapEl.hidden = true;
+      progressFillEl.style.width = "0%";
+      progressValueEl.textContent = "0%";
+      progressStepEl.textContent = "Waiting to start";
+    }
+
+    function syncDeepSeekPanelVisibility() {
+      deepseekPanelEl.hidden = !modeDeepSeekEl.checked;
+    }
+
+    function resetDeepSeekLiveOutput() {
+      lastLiveText = "";
+      deepseekLiveTextEl.textContent = "Waiting for DeepSeek output...";
+      deepseekLiveStatsEl.textContent = "0 chars";
+    }
+
+    function updateDeepSeekLiveOutput(value) {
+      const text = String(value || "");
+      if (text === lastLiveText) {
+        return;
+      }
+      lastLiveText = text;
+
+      if (!text.trim()) {
+        deepseekLiveTextEl.textContent = "Waiting for DeepSeek output...";
+        deepseekLiveStatsEl.textContent = "0 chars";
+        return;
+      }
+
+      deepseekLiveTextEl.textContent = text;
+      deepseekLiveStatsEl.textContent = `${text.length} chars`;
+      deepseekLiveTextEl.scrollTop = deepseekLiveTextEl.scrollHeight;
+    }
+
+    function ensureDeepSeekKey() {
+      const promptText = "Please input DEEPSEEK_API_KEY for this conversion job:";
+      const typed = window.prompt(promptText, deepseekApiKey);
+      if (!typed || !typed.trim()) {
+        setStatus("DeepSeek mode requires DEEPSEEK_API_KEY.", "fail");
+        modeLocalEl.checked = true;
+        modeDeepSeekEl.checked = false;
+        return false;
+      }
+
+      deepseekApiKey = typed.trim();
+      return true;
+    }
+
+    modeDeepSeekEl.addEventListener("change", () => {
+      if (modeDeepSeekEl.checked) {
+        ensureDeepSeekKey();
+      }
+      syncDeepSeekPanelVisibility();
+    });
+
+    modeLocalEl.addEventListener("change", () => {
+      syncDeepSeekPanelVisibility();
+    });
+
+    async function pollJob(jobId) {
+      stopPolling();
+      let consecutiveFailures = 0;
+      pollTimer = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/jobs/${jobId}`, { cache: "no-store" });
+          if (!res.ok) {
+            let detail = "";
+            try {
+              detail = await res.text();
+            } catch {
+              detail = "";
+            }
+
+            consecutiveFailures += 1;
+            if (res.status === 404) {
+              setStatus("Job not found. The server may have restarted. Please submit again.", "fail");
+              stopPolling();
+              convertBtn.disabled = false;
+              return;
+            }
+
+            if (consecutiveFailures >= 5) {
+              const extra = detail ? ` Detail: ${detail}` : "";
+              setStatus(`Unable to fetch job status after retries.${extra}`, "fail");
+              stopPolling();
+              convertBtn.disabled = false;
+              return;
+            }
+
+            setStatus(`Status request failed, retrying (${consecutiveFailures}/5)...`);
+            return;
+          }
+
+          consecutiveFailures = 0;
+          const data = await res.json();
+          const progress = data.progress ?? 0;
+          const currentStep = data.current_step || "Processing...";
+          const pageInfo = (data.current_page && data.total_pages)
+            ? ` (${data.current_page}/${data.total_pages})`
+            : "";
+
+          if (data.used_deepseek) {
+            deepseekPanelEl.hidden = false;
+            updateDeepSeekLiveOutput(data.deepseek_live_output ?? "");
+          } else {
+            syncDeepSeekPanelVisibility();
+            resetDeepSeekLiveOutput();
+          }
+
+          updateProgressUI(progress, `${currentStep}${pageInfo}`);
+          metaEl.innerHTML = `
+            <div>Job ID: ${data.job_id}</div>
+            <div>Status: ${data.status}</div>
+            <div>Recognition mode: ${data.used_deepseek ? "deepseek" : "local"}</div>
+            <div>Current step: ${data.current_step ?? "-"}</div>
+            <div>Progress: ${data.progress ?? 0}%</div>
+            <div>Page progress: ${data.current_page ?? "-"}/${data.total_pages ?? "-"}</div>
+            <div>Pages: ${data.pages ?? "-"}</div>
+            <div>Extracted images: ${data.extracted_images ?? "-"}</div>
+          `;
+
+          if (data.status === "processing" || data.status === "pending") {
+            setStatus(`Converting PDF... ${progress}%`);
+            return;
+          }
+
+          if (data.status === "completed") {
+            setStatus("Conversion finished. Your package is ready.", "ok");
+            updateProgressUI(100, "Finished. Download is ready");
+            downloadEl.innerHTML = `<a class="download" href="/api/jobs/${jobId}/download">Download ZIP</a>`;
+            convertBtn.disabled = false;
+            stopPolling();
+            return;
+          }
+
+          if (data.status === "failed") {
+            setStatus(`Conversion failed: ${data.error || "unknown error"}`, "fail");
+            updateProgressUI(data.progress ?? 0, data.current_step || "Conversion failed");
+            convertBtn.disabled = false;
+            stopPolling();
+          }
+        } catch (error) {
+          consecutiveFailures += 1;
+          if (consecutiveFailures >= 5) {
+            const message = error instanceof Error ? error.message : "network error";
+            setStatus(`Unable to fetch job status after retries: ${message}`, "fail");
+            stopPolling();
+            convertBtn.disabled = false;
+            return;
+          }
+          setStatus(`Network issue while polling, retrying (${consecutiveFailures}/5)...`);
+        }
+      }, 1200);
+    }
+
+    convertBtn.addEventListener("click", async () => {
+      const file = fileInput.files?.[0];
+      if (!file) {
+        setStatus("Please choose a PDF file.", "fail");
+        return;
+      }
+
+      const mode = modeDeepSeekEl.checked ? "deepseek" : "local";
+      if (mode === "deepseek" && !ensureDeepSeekKey()) {
+        return;
+      }
+
+      convertBtn.disabled = true;
+      downloadEl.innerHTML = "";
+      metaEl.innerHTML = "";
+      if (mode === "deepseek") {
+        deepseekPanelEl.hidden = false;
+        resetDeepSeekLiveOutput();
+      } else {
+        syncDeepSeekPanelVisibility();
+      }
+      setStatus("Uploading PDF...");
+      updateProgressUI(1, "Uploading PDF");
+
+      const form = new FormData();
+      form.append("file", file);
+      form.append("recognition_mode", mode);
+      if (mode === "deepseek") {
+        form.append("deepseek_api_key", deepseekApiKey);
+      }
+
+      try {
+        const res = await fetch("/api/jobs", { method: "POST", body: form });
+        if (!res.ok) {
+          const detail = await res.text();
+          setStatus(`Upload failed: ${detail}`, "fail");
+          resetProgressUI();
+          convertBtn.disabled = false;
+          return;
+        }
+
+        const payload = await res.json();
+        setStatus("Upload complete. Job started.");
+        pollJob(payload.job_id);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "network error";
+        setStatus(`Upload request failed: ${message}`, "fail");
+        resetProgressUI();
+        convertBtn.disabled = false;
+      }
+    });
+
+    syncDeepSeekPanelVisibility();
+    resetDeepSeekLiveOutput();
+  </script>
+</body>
+</html>

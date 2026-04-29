@@ -165,6 +165,22 @@
       gap: 3px;
     }
 
+    .compile-log {
+      margin-top: 6px;
+      padding: 10px;
+      border: 1px solid #d9e3ea;
+      border-radius: 8px;
+      background: #ffffff;
+      color: #243447;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.8rem;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 180px;
+      overflow: auto;
+    }
+
     .work-grid {
       display: grid;
       grid-template-columns: minmax(0, 1.65fr) minmax(280px, 1fr);
@@ -312,6 +328,15 @@
       statusEl.className = `status ${mode}`.trim();
     }
 
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
     function stopPolling() {
       if (pollTimer) {
         clearInterval(pollTimer);
@@ -438,6 +463,12 @@
           }
 
           updateProgressUI(progress, `${currentStep}${pageInfo}`);
+          const compileSuccessText =
+            data.compile_success === true ? "yes" : (data.compile_success === false ? "no" : "-");
+          const compileEngineText = data.compile_engine || "-";
+          const compileLogSection = data.compile_log
+            ? `<div class="compile-log">${escapeHtml(data.compile_log)}</div>`
+            : "";
           metaEl.innerHTML = `
             <div>Job ID: ${data.job_id}</div>
             <div>Status: ${data.status}</div>
@@ -447,6 +478,9 @@
             <div>Page progress: ${data.current_page ?? "-"}/${data.total_pages ?? "-"}</div>
             <div>Pages: ${data.pages ?? "-"}</div>
             <div>Extracted images: ${data.extracted_images ?? "-"}</div>
+            <div>Compile success: ${compileSuccessText}</div>
+            <div>Compile engine: ${escapeHtml(compileEngineText)}</div>
+            ${compileLogSection}
           `;
 
           if (data.status === "processing" || data.status === "pending") {
@@ -455,9 +489,18 @@
           }
 
           if (data.status === "completed") {
-            setStatus("Conversion finished. Your package is ready.", "ok");
-            updateProgressUI(100, "Finished. Download is ready");
-            downloadEl.innerHTML = `<a class="download" href="/api/jobs/${jobId}/download">Download ZIP</a>`;
+            if (data.compile_success === false) {
+              setStatus("Conversion finished, but LaTeX compilation failed. Check compile log below.", "fail");
+            } else {
+              setStatus("Conversion and LaTeX compilation finished.", "ok");
+            }
+            updateProgressUI(100, "Finished. Downloads are ready");
+
+            const zipButton = `<a class="download" href="/api/jobs/${jobId}/download">Download ZIP</a>`;
+            const pdfButton = data.compiled_pdf
+              ? ` <a class="download" href="/api/jobs/${jobId}/download-pdf">Download PDF</a>`
+              : "";
+            downloadEl.innerHTML = `${zipButton}${pdfButton}`;
             convertBtn.disabled = false;
             stopPolling();
             return;

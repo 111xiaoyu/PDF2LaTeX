@@ -11,12 +11,14 @@ class DeepSeekLatexRefiner:
     def __init__(
         self,
         api_key: str,
-        model: str = "deepseek-reasoner",
+        model: str = "deepseek-v4-pro",
         base_url: str = "https://api.deepseek.com",
         timeout: float = 180.0,
         max_tokens: int | None = None,
     ) -> None:
         self._model = model
+        self._reasoning_effort = "high"
+        self._thinking_config = {"thinking": {"type": "enabled"}}
         env_tokens = os.getenv("DEEPSEEK_MAX_TOKENS", "8192").strip()
         self._max_tokens = self._resolve_max_tokens(max_tokens=max_tokens, env_tokens=env_tokens)
         self._client = OpenAI(
@@ -51,7 +53,11 @@ class DeepSeekLatexRefiner:
             "Repair line breaks and hyphenated words split by line endings. "
             "For formulas, use \\begin{equation} ... \\end{equation}. "
             "Do not use \\tag{...}, \\eqno, \\begin{cases}, or \\end{cases}. "
-            "Do not add unsupported claims or hallucinated content."
+            "Do not add unsupported claims or hallucinated content. "
+            "If the input contains [System] Figure hints with file paths, insert \\begin{figure}[H] "
+            "environments with \\includegraphics and \\caption at appropriate positions matching "
+            "the original paper layout (usually near where 'Fig. N' is referenced in the text). "
+            "Use width=0.95\\textwidth for all \\includegraphics."
         )
         user_prompt = (
             f"Page number: {page_number}\n"
@@ -68,6 +74,8 @@ class DeepSeekLatexRefiner:
             ],
             temperature=0.1,
             stream=False,
+            reasoning_effort=self._reasoning_effort,
+            extra_body=self._thinking_config,
         )
 
         content = response.choices[0].message.content or ""
@@ -133,6 +141,8 @@ class DeepSeekLatexRefiner:
                 "messages": messages,
                 "temperature": 0.0,
                 "stream": False,
+                "reasoning_effort": self._reasoning_effort,
+                "extra_body": self._thinking_config,
             }
             if self._max_tokens is not None:
                 request_kwargs["max_tokens"] = self._max_tokens
@@ -142,9 +152,11 @@ class DeepSeekLatexRefiner:
             if stream_callback is not None and content:
                 stream_callback(content)
 
-        normalized = self._strip_markdown_fence(content)
-        sanitized = self._sanitize_full_document_output(normalized)
-        return sanitized
+        return self.postprocess_document(content)
+
+    def postprocess_document(self, text: str) -> str:
+        normalized = self._strip_markdown_fence(text)
+        return self._sanitize_full_document_output(normalized)
 
     def _stream_document_response(
         self,
@@ -156,6 +168,8 @@ class DeepSeekLatexRefiner:
             "messages": messages,
             "temperature": 0.0,
             "stream": True,
+            "reasoning_effort": self._reasoning_effort,
+            "extra_body": self._thinking_config,
         }
         if self._max_tokens is not None:
             request_kwargs["max_tokens"] = self._max_tokens
@@ -163,18 +177,37 @@ class DeepSeekLatexRefiner:
         stream = self._client.chat.completions.create(**request_kwargs)
 
         chunks: list[str] = []
+        silent_events = 0
+        heartbeat_every = 35
+        stream_callback("\n[System] DeepSeek stream connected, waiting for output...\n")
         for event in stream:
             choices = getattr(event, "choices", None)
             if not choices:
+                silent_events += 1
+                if silent_events % heartbeat_every == 0:
+                    stream_callback("\n[System] DeepSeek is still processing...\n")
                 continue
 
             delta = getattr(choices[0], "delta", None)
-            piece = self._normalize_stream_piece(getattr(delta, "content", ""))
-            if not piece:
+            content_piece = self._normalize_stream_piece(getattr(delta, "content", ""))
+            reasoning_piece = self._normalize_stream_piece(getattr(delta, "reasoning_content", ""))
+
+            if not content_piece and not reasoning_piece:
+                silent_events += 1
+                if silent_events % heartbeat_every == 0:
+                    stream_callback("\n[System] DeepSeek is still processing...\n")
                 continue
 
-            chunks.append(piece)
-            stream_callback(piece)
+            silent_events = 0
+
+            if reasoning_piece:
+                stream_callback(reasoning_piece)
+            if content_piece:
+                chunks.append(content_piece)
+                stream_callback(content_piece)
+
+        if not chunks:
+            stream_callback("\n[System] Stream ended without final content chunk. Falling back to non-stream request...\n")
 
         return "".join(chunks)
 
@@ -308,6 +341,7 @@ class DeepSeekLatexRefiner:
             return f"\\includegraphics[width=0.5\\linewidth]{{{figure_path}}}"
 
         value = re.sub(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}", _fix_includegraphics, value)
+        value = self._ensure_figure_includegraphics(value)
         value = self._normalize_figure_labels_and_refs(value)
         value = self._normalize_table_labels_and_refs(value)
         value = self._fix_tabular_column_mismatch(value)
@@ -367,6 +401,55 @@ class DeepSeekLatexRefiner:
             value = re.sub(r"\\ref\{fig:0*([0-9]+)\}", _bound_ref, value)
 
         return value
+
+    def _ensure_figure_includegraphics(self, text: str) -> str:
+        figure_env_pattern = re.compile(r"\\begin\{figure\}(?:\[[^\]]*\])?[\s\S]*?\\end\{figure\}")
+        seq_counter = 1
+
+        def _extract_number(block: str, fallback: int) -> int:
+            label_match = re.search(r"\\label\{fig\s*:\s*0*([0-9]+)\}", block, re.IGNORECASE)
+            if label_match:
+                return max(1, int(label_match.group(1)))
+
+            caption_match = re.search(
+                r"\\caption\{[^{}]*?(?:figure|fig\.?|图)\s*([0-9]+)",
+                block,
+                re.IGNORECASE,
+            )
+            if caption_match:
+                return max(1, int(caption_match.group(1)))
+
+            return fallback
+
+        def _rewrite_figure_block(match: re.Match[str]) -> str:
+            nonlocal seq_counter
+            block = match.group(0)
+            fallback_no = seq_counter
+            seq_counter += 1
+
+            if re.search(r"\\includegraphics(?:\[[^\]]*\])?\{[^}]+\}", block):
+                return block
+
+            figure_no = _extract_number(block, fallback=fallback_no)
+            include_line = f"\\includegraphics[width=0.5\\linewidth]{{figures/figure{figure_no}}}"
+
+            lines = block.splitlines()
+            for index, line in enumerate(lines):
+                if "\\centering" in line:
+                    indent = re.match(r"\s*", line).group(0)
+                    lines.insert(index + 1, f"{indent}{include_line}")
+                    return "\n".join(lines)
+
+            for index, line in enumerate(lines):
+                if "\\begin{figure}" in line:
+                    indent = re.match(r"\s*", line).group(0) + "  "
+                    lines.insert(index + 1, f"{indent}\\centering")
+                    lines.insert(index + 2, f"{indent}{include_line}")
+                    return "\n".join(lines)
+
+            return block
+
+        return figure_env_pattern.sub(_rewrite_figure_block, text)
 
     def _normalize_table_labels_and_refs(self, text: str) -> str:
         table_env_pattern = re.compile(r"\\begin\{table\}[\s\S]*?\\end\{table\}")
@@ -560,6 +643,11 @@ class DeepSeekLatexRefiner:
     def _ensure_required_packages(self, text: str) -> str:
         needs_booktabs = bool(re.search(r"\\\\toprule|\\\\midrule|\\\\bottomrule", text))
         has_booktabs = "\\usepackage{booktabs}" in text
+        needs_algorithm = bool(
+            re.search(r"\\\\begin\{algorithm\}|\\\\begin\{algorithmic\}|\\\\State\\b|\\\\For\\b|\\\\While\\b", text)
+        )
+        has_algorithm = "\\usepackage{algorithm}" in text
+        has_algpseudocode = "\\usepackage{algpseudocode}" in text
 
         value = text
         if needs_booktabs and not has_booktabs:
@@ -567,4 +655,18 @@ class DeepSeekLatexRefiner:
                 value = value.replace("\\begin{document}", "\\usepackage{booktabs}\n\\begin{document}", 1)
             else:
                 value = "\\usepackage{booktabs}\n" + value
+
+        if needs_algorithm:
+            insert_parts: list[str] = []
+            if not has_algorithm:
+                insert_parts.append("\\usepackage{algorithm}")
+            if not has_algpseudocode:
+                insert_parts.append("\\usepackage{algpseudocode}")
+
+            if insert_parts:
+                insertion = "\n".join(insert_parts) + "\n"
+                if "\\begin{document}" in value:
+                    value = value.replace("\\begin{document}", f"{insertion}\\begin{{document}}", 1)
+                else:
+                    value = insertion + value
         return value

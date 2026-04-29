@@ -28,6 +28,10 @@ class JobRecord:
     total_pages: int | None = None
     deepseek_live_output: str = ""
     output_zip: Path | None = None
+    compiled_pdf: Path | None = None
+    compile_success: bool | None = None
+    compile_engine: str | None = None
+    compile_log: str | None = None
     error: str | None = None
     pages: int | None = None
     extracted_images: int | None = None
@@ -39,4 +43,5 @@ class JobRecord:
         payload["updated_at"] = self.updated_at.isoformat()
         payload["input_pdf"] = str(self.input_pdf)
         payload["output_zip"] = str(self.output_zip) if self.output_zip else None
+        payload["compiled_pdf"] = str(self.compiled_pdf) if self.compiled_pdf else None
         return payload

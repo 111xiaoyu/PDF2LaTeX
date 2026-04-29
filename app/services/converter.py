@@ -30,7 +30,7 @@ class PDFToLatexConverter:
     def __init__(self) -> None:
         self._image_counter = 0
         self._default_api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-        self._model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip() or "deepseek-chat"
+        self._model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro").strip() or "deepseek-v4-pro"
         self._base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
 
     def supports_refiner(self, override_api_key: str | None = None) -> bool:
@@ -86,66 +86,25 @@ class PDFToLatexConverter:
 
                 self._notify_progress(
                     progress_callback,
-                    45,
-                    "Preparing full document text for DeepSeek",
+                    48,
+                    "Preparing DeepSeek page-by-page recognition",
                     current_page=0,
-                    total_pages=0,
+                    total_pages=total_pages,
                 )
-                raw_document_text = self._extract_raw_document_text(doc)
+                if live_output_callback is not None:
+                    live_output_callback(
+                        "\n[System] Direct page-by-page DeepSeek mode enabled.\n"
+                    )
 
-                self._notify_progress(
-                    progress_callback,
-                    60,
-                    "DeepSeek is generating full LaTeX document",
-                    current_page=0,
-                    total_pages=0,
-                )
-                full_tex = page_refiner.refine_document(
-                    raw_text=raw_document_text,
+                full_tex = self._recover_document_by_pages(
+                    doc=doc,
+                    refiner=page_refiner,
                     figure_specs=figure_specs,
-                    title_hint=pdf_path.stem,
-                    stream_callback=live_output_callback,
+                    progress_callback=progress_callback,
+                    live_output_callback=live_output_callback,
+                    progress_start=52,
+                    progress_end=90,
                 )
-
-                if self._is_likely_incomplete_document(full_tex):
-                    self._notify_progress(
-                        progress_callback,
-                        76,
-                        "Detected incomplete output, retrying DeepSeek full generation",
-                        current_page=0,
-                        total_pages=0,
-                    )
-                    if live_output_callback is not None:
-                        live_output_callback(
-                            "\n\n[System] The first full-document output looked incomplete. Retrying once...\n"
-                        )
-
-                    retry_tex = page_refiner.refine_document(
-                        raw_text=raw_document_text,
-                        figure_specs=figure_specs,
-                        title_hint=pdf_path.stem,
-                        stream_callback=live_output_callback,
-                    )
-                    if not self._is_likely_incomplete_document(retry_tex):
-                        full_tex = retry_tex
-                    else:
-                        self._notify_progress(
-                            progress_callback,
-                            82,
-                            "Fallback: DeepSeek page-by-page recovery",
-                            current_page=0,
-                            total_pages=total_pages,
-                        )
-                        if live_output_callback is not None:
-                            live_output_callback(
-                                "\n\n[System] Full-document output is still incomplete. "
-                                "Switching to page-by-page DeepSeek recovery mode.\n"
-                            )
-                        full_tex = self._recover_document_by_pages(
-                            doc=doc,
-                            refiner=page_refiner,
-                            progress_callback=progress_callback,
-                        )
 
                 self._notify_progress(
                     progress_callback,
@@ -319,7 +278,7 @@ class PDFToLatexConverter:
             return
         callback(progress, step, current_page, total_pages)
 
-    def _is_likely_incomplete_document(self, tex_content: str) -> bool:
+    def _is_likely_incomplete_document(self, tex_content: str, raw_text: str | None = None) -> bool:
         value = (tex_content or "").strip()
         if not value:
             return True
@@ -327,9 +286,16 @@ class PDFToLatexConverter:
             return True
 
         for env in ("equation", "align", "figure", "table", "tabular"):
-            begin_count = len(re.findall(rf"\\\\begin\{{{env}\*?\}}", value))
-            end_count = len(re.findall(rf"\\\\end\{{{env}\*?\}}", value))
+            begin_count = len(re.findall(rf"\\begin\{{{env}\*?\}}", value))
+            end_count = len(re.findall(rf"\\end\{{{env}\*?\}}", value))
             if begin_count > end_count:
+                return True
+
+        # If the LaTeX output is much shorter than extracted raw text, it is likely truncated.
+        if raw_text:
+            raw_len = len(raw_text)
+            tex_len = len(value)
+            if raw_len >= 8000 and tex_len < int(raw_len * 0.33):
                 return True
 
         body = value.split("\\end{document}", 1)[0]
@@ -354,27 +320,57 @@ class PDFToLatexConverter:
         self,
         doc: fitz.Document,
         refiner: DeepSeekLatexRefiner,
-        progress_callback: ProgressCallback | None,
+        figure_specs: list[dict[str, str]] | None = None,
+        progress_callback: ProgressCallback | None = None,
+        live_output_callback: LiveOutputCallback | None = None,
+        progress_start: int = 82,
+        progress_end: int = 90,
     ) -> str:
         total_pages = max(1, doc.page_count)
         fragments: list[str] = []
+        figure_specs = figure_specs or []
+
+        # Build per-page figure hints
+        figures_by_page: dict[int, list[dict[str, str]]] = {}
+        for spec in figure_specs:
+            p = int(spec.get("page", "0"))
+            figures_by_page.setdefault(p, []).append(spec)
+
+        if live_output_callback is not None:
+            live_output_callback(
+                f"\n[System] DeepSeek page-by-page processing starts, total pages: {total_pages}, figures extracted: {len(figure_specs)}.\n"
+            )
 
         for page_index in range(doc.page_count):
             page = doc.load_page(page_index)
             current_page = page_index + 1
-            page_progress = 82 + int((current_page / total_pages) * 8)
+            page_progress = progress_start + int((current_page / total_pages) * max(1, progress_end - progress_start))
             self._notify_progress(
                 progress_callback,
-                min(90, page_progress),
+                min(progress_end, page_progress),
                 f"DeepSeek page recovery {current_page}/{total_pages}",
                 current_page=current_page,
                 total_pages=total_pages,
             )
 
+            if live_output_callback is not None:
+                live_output_callback(f"\n[System] Processing page {current_page}/{total_pages}...\n")
+
             page_text = page.get_text("text").replace("\u00a0", " ").replace("\x0c", "\n")
             raw_lines = [line.strip() for line in page_text.splitlines() if line.strip()]
             if not raw_lines:
                 continue
+
+            # Attach figure hints for this page
+            page_figures = figures_by_page.get(current_page, [])
+            if page_figures:
+                figure_hints = "\n".join(
+                    f"Figure {f['number']} is available at path: {f['path']}, caption: {f['caption']}"
+                    for f in page_figures
+                )
+                raw_lines = [
+                    f"[System] Figures on this page \u2014 use \\includegraphics with these paths:\n{figure_hints}"
+                ] + raw_lines
 
             try:
                 refined_lines = refiner.refine_page(page_number=current_page, raw_lines=raw_lines)
@@ -387,7 +383,8 @@ class PDFToLatexConverter:
                 fragments.extend([f"{self._escape_latex(line)}\n" for line in raw_lines])
             fragments.append("\\clearpage\n")
 
-        return self._build_document(fragments)
+        recovered = self._build_document(fragments)
+        return refiner.postprocess_document(recovered)
 
     def _calculate_page_progress(self, current_page: int, total_pages: int) -> int:
         if total_pages <= 0:
@@ -805,7 +802,7 @@ class PDFToLatexConverter:
             area_ratio = (region.width * region.height) / page_area if page_area > 0 else 0
             if area_ratio < 0.018:
                 continue
-            if self._text_overlap_ratio(region, text_rects) > 0.55:
+            if self._text_overlap_ratio(region, text_rects) > 0.40:
                 continue
 
             pix = page.get_pixmap(matrix=fitz.Matrix(2.2, 2.2), clip=region, alpha=False)
@@ -834,6 +831,7 @@ class PDFToLatexConverter:
         max_area = page_area * 0.82
         rects: list[fitz.Rect] = []
 
+        # ---- Image blocks from text dict (type=1) ----
         for block in text_dict.get("blocks", []):
             if block.get("type") != 1:
                 continue
@@ -845,19 +843,83 @@ class PDFToLatexConverter:
                 continue
             rects.append(rect)
 
-        for drawing in page.get_drawings():
-            rect_data = drawing.get("rect")
-            if rect_data is None:
+        # ---- Embedded bitmap images via get_image_info ----
+        for img_info in page.get_image_info():
+            bbox = img_info.get("bbox", None)
+            if bbox is None:
                 continue
-            rect = fitz.Rect(rect_data)
+            rect = fitz.Rect(*bbox)
             area = rect.width * rect.height
-            if rect.width < 24 or rect.height < 24:
+            # Keep figures; skip tiny page decorations (IEEE logos, page numbers)
+            if rect.width < 60 or rect.height < 60:
                 continue
             if area < min_area or area > max_area:
                 continue
             rects.append(rect)
 
-        return self._merge_rectangles(rects, gap=10.0)
+        # ---- Drawing clusters (vector graphics) grouped by proximity ----
+        drawing_clusters = self._cluster_drawings(page, gap=16.0)
+        text_rects = self._extract_text_rects(text_dict)
+
+        for cluster in drawing_clusters:
+            if len(cluster) < 3:
+                continue
+            # Compute union of this cluster
+            union = fitz.Rect(cluster[0])
+            for r in cluster[1:]:
+                union = fitz.Rect(
+                    min(union.x0, r.x0), min(union.y0, r.y0),
+                    max(union.x1, r.x1), max(union.y1, r.y1),
+                )
+            area = union.width * union.height
+            if area < min_area or area > max_area:
+                continue
+            if union.width < 60 or union.height < 60:
+                continue
+            # Exclude clusters heavily overlapped with body text
+            overlap = self._text_overlap_ratio(union, text_rects)
+            if overlap > 0.35:
+                continue
+            rects.append(union)
+
+        return self._merge_rectangles(rects, gap=8.0)
+
+    def _cluster_drawings(self, page: fitz.Page, gap: float) -> list[list[fitz.Rect]]:
+        """Group drawings into spatial clusters separated by vertical gaps.
+        Individual drawing elements can be tiny (lines, curves); filtering is
+        done on cluster union area by the caller, not on individual elements.
+        """
+        drawings = page.get_drawings()
+        if not drawings:
+            return []
+
+        rects = [fitz.Rect(d["rect"]) for d in drawings]
+        # Keep all drawings for clustering — even hairline strokes matter for figures.
+        rects.sort(key=lambda r: (round(r.y0, 1), r.x0))
+
+        clusters: list[list[fitz.Rect]] = []
+        current_cluster = [rects[0]]
+        for r in rects[1:]:
+            prev = current_cluster[-1]
+            # Same cluster if vertical gap is small or horizontally adjacent
+            if r.y0 - prev.y1 <= gap or (r.y0 <= prev.y1 and abs(r.x0 - prev.x0) < 200):
+                current_cluster.append(r)
+            else:
+                clusters.append(current_cluster)
+                current_cluster = [r]
+        clusters.append(current_cluster)
+        return clusters
+
+    def _extract_text_rects(self, text_dict: dict) -> list[fitz.Rect]:
+        """Collect bounding boxes of all text blocks."""
+        rects: list[fitz.Rect] = []
+        for block in text_dict.get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            rect = fitz.Rect(block.get("bbox", [0, 0, 0, 0]))
+            if rect.width > 0 and rect.height > 0:
+                rects.append(rect)
+        return rects
 
     def _merge_rectangles(self, rects: list[fitz.Rect], gap: float) -> list[fitz.Rect]:
         merged: list[fitz.Rect] = []
@@ -915,37 +977,43 @@ class PDFToLatexConverter:
         if not candidates:
             return None
 
+        # Score candidates: closest bottom edge wins, penalize text overlap
         nearest_bottom = max(rect.y1 for rect in candidates)
-        band_candidates = [
-            rect for rect in candidates
-            if abs(rect.y1 - nearest_bottom) <= 26
-        ]
+        best_candidate = None
+        best_score = float("inf")
+        for rect in candidates:
+            dist = nearest_bottom - rect.y1
+            overlap = self._text_overlap_ratio(rect, text_rects)
+            score = dist + overlap * 200  # heavy penalty for text overlap
+            if rect.width < 80 or rect.height < 80:
+                score += 50
+            if score < best_score:
+                best_score = score
+                best_candidate = rect
 
-        union = fitz.Rect(band_candidates[0])
-        for rect in band_candidates[1:]:
-            union = fitz.Rect(
-                min(union.x0, rect.x0),
-                min(union.y0, rect.y0),
-                max(union.x1, rect.x1),
-                max(union.y1, rect.y1),
-            )
+        if best_candidate is None:
+            return None
 
-        overlap_ratio = self._text_overlap_ratio(union, text_rects)
-        if overlap_ratio > 0.88:
+        overlap_ratio = self._text_overlap_ratio(best_candidate, text_rects)
+        if overlap_ratio > 0.55:
             return None
 
         margin = 6
         clipped = fitz.Rect(
-            max(page_rect.x0, union.x0 - margin),
-            max(page_rect.y0, union.y0 - margin),
-            min(page_rect.x1, union.x1 + margin),
-            min(page_rect.y1, union.y1 + margin),
+            max(page_rect.x0, best_candidate.x0 - margin),
+            max(page_rect.y0, best_candidate.y0 - margin),
+            min(page_rect.x1, best_candidate.x1 + margin),
+            min(page_rect.y1, best_candidate.y1 + margin),
         )
         if clipped.width < 36 or clipped.height < 36:
             return None
         return clipped
 
     def _text_overlap_ratio(self, rect: fitz.Rect, text_rects: list[fitz.Rect]) -> float:
+        """Return the fraction of *rect* overlapped by body-text blocks.
+        Text blocks that are mostly contained within *rect* (figure labels,
+        axis annotations, captions) are excluded to avoid penalising real figures.
+        """
         base_area = rect.width * rect.height
         if base_area <= 0:
             return 1.0
@@ -955,7 +1023,13 @@ class PDFToLatexConverter:
             inter = rect & text_rect
             if inter.is_empty:
                 continue
-            overlap_area += inter.width * inter.height
+            text_area = text_rect.width * text_rect.height
+            inter_area = inter.width * inter.height
+            # If the text block is mostly (>70%) inside the figure region,
+            # treat it as a figure-internal label rather than body text.
+            if text_area > 0 and inter_area / text_area > 0.70:
+                continue
+            overlap_area += inter_area
 
         return overlap_area / base_area
 
@@ -982,11 +1056,25 @@ class PDFToLatexConverter:
         page_images = page.get_images(full=True)
         page_count = 0
 
+        # Collect image info bboxes for size filtering
+        image_bboxes: dict[int, fitz.Rect] = {}
+        for img_info in page.get_image_info():
+            bbox = img_info.get("bbox", None)
+            xref = img_info.get("xref", 0) or img_info.get("number", 0)
+            if bbox and xref:
+                image_bboxes[xref] = fitz.Rect(*bbox)
+
         for index, image_meta in enumerate(page_images, start=1):
             xref = image_meta[0]
             if xref in seen_xrefs:
                 continue
             seen_xrefs.add(xref)
+
+            # Skip tiny images (IEEE logos, page numbers) by bbox
+            if xref in image_bboxes:
+                rect = image_bboxes[xref]
+                if rect.width < 65 or rect.height < 65:
+                    continue
 
             image = doc.extract_image(xref)
             image_bytes = image.get("image")

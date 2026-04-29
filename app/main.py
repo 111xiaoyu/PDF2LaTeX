@@ -12,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.models import JobRecord, JobStatus
 from app.services.converter import PDFToLatexConverter
+from app.services.latex_compiler import LatexCompiler
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STORAGE_DIR = BASE_DIR / "storage" / "jobs"
@@ -22,6 +23,7 @@ STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="PDF to LaTeX Platform", version="1.0.0")
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 converter = PDFToLatexConverter()
+latex_compiler = LatexCompiler()
 MAX_DEEPSEEK_LIVE_OUTPUT_CHARS = 16000
 
 jobs: dict[str, JobRecord] = {}
@@ -117,6 +119,19 @@ def download_output(job_id: str) -> FileResponse:
     )
 
 
+@app.get("/api/jobs/{job_id}/download-pdf")
+def download_compiled_pdf(job_id: str) -> FileResponse:
+    record = _get_job_or_404(job_id)
+    if record.status != JobStatus.COMPLETED or not record.compiled_pdf or not record.compiled_pdf.exists():
+        raise HTTPException(status_code=409, detail="Compiled PDF is not ready yet.")
+
+    return FileResponse(
+        path=str(record.compiled_pdf),
+        media_type="application/pdf",
+        filename=f"latex_result_{job_id}.pdf",
+    )
+
+
 def _get_job_or_404(job_id: str) -> JobRecord:
     with job_lock:
         record = jobs.get(job_id)
@@ -168,10 +183,51 @@ def _process_job(
             progress_callback=report_progress,
             live_output_callback=report_deepseek_stream if use_deepseek else None,
         )
+
+        compile_success = False
+        compile_engine = ""
+        compile_log = ""
+        compiled_pdf: Path | None = None
         _set_job_state(
             job_id,
             status=JobStatus.PROCESSING,
-            progress=95,
+            progress=94,
+            current_step="Compiling LaTeX to PDF",
+        )
+        try:
+            compile_result = latex_compiler.compile_main_tex(output_dir / "main.tex")
+            compile_success = True
+            compile_engine = compile_result.engine
+            compile_log = compile_result.log_excerpt
+            compiled_pdf = compile_result.pdf_path
+            _set_job_state(
+                job_id,
+                status=JobStatus.PROCESSING,
+                progress=96,
+                current_step=f"LaTeX compiled successfully ({compile_engine})",
+                compiled_pdf=compiled_pdf,
+                compile_success=True,
+                compile_engine=compile_engine,
+                compile_log=compile_log,
+            )
+        except Exception as compile_exc:  # noqa: BLE001
+            compile_success = False
+            compile_engine = ""
+            compile_log = str(compile_exc)
+            _set_job_state(
+                job_id,
+                status=JobStatus.PROCESSING,
+                progress=96,
+                current_step="LaTeX compile failed, packaging source project",
+                compile_success=False,
+                compile_engine=compile_engine,
+                compile_log=compile_log,
+            )
+
+        _set_job_state(
+            job_id,
+            status=JobStatus.PROCESSING,
+            progress=97,
             current_step="Packaging LaTeX output",
         )
         zip_base = output_dir.parent / "latex_output"
@@ -189,8 +245,12 @@ def _process_job(
             output_zip=zip_path,
             pages=stats.get("pages"),
             extracted_images=stats.get("extracted_images"),
+            compiled_pdf=compiled_pdf,
+            compile_success=compile_success,
+            compile_engine=compile_engine,
+            compile_log=compile_log,
             progress=100,
-            current_step="Finished. Download is ready",
+            current_step="Finished. Downloads are ready",
         )
     except Exception as exc:  # noqa: BLE001
         _set_job_state(
@@ -208,6 +268,10 @@ def _set_job_state(
     error: str | None = None,
     pages: int | None = None,
     extracted_images: int | None = None,
+    compiled_pdf: Path | None = None,
+    compile_success: bool | None = None,
+    compile_engine: str | None = None,
+    compile_log: str | None = None,
     progress: int | None = None,
     current_step: str | None = None,
     current_page: int | None = None,
@@ -226,6 +290,14 @@ def _set_job_state(
             record.pages = pages
         if extracted_images is not None:
             record.extracted_images = extracted_images
+        if compiled_pdf is not None:
+            record.compiled_pdf = compiled_pdf
+        if compile_success is not None:
+            record.compile_success = compile_success
+        if compile_engine is not None:
+            record.compile_engine = compile_engine
+        if compile_log is not None:
+            record.compile_log = compile_log
         if progress is not None:
             record.progress = max(0, min(100, int(progress)))
         if current_step is not None:
